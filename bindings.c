@@ -1,136 +1,41 @@
-// bindings.c -- Key bindings in Pluto and the actions they trigger
-//
-// This file is responsible for key bindings and performing actions based on
-// those key bindings, including configuring the programs which are spawned.
+// bindings.c -- dwm's key/button bindings and the actions they trigger.
 //
 // Copyright 2026 Isaac Freund, 2026 Jack Conger.  See LICENSE for details.
+// Copyright 2026 Yash Sharma.  See LICENSE for details.
 
 #include <signal.h>
 #include <stdlib.h>
 #include <unistd.h>
 
-#include <xkbcommon/xkbcommon.h>
-
 #include "pluto.h"
 
-
-// Types
-
-enum BindingManageAction {
-	BINDING_MANAGE_NONE,
-	BINDING_MANAGE_ENABLE,
-	BINDING_MANAGE_DISABLE
-};
-
 struct XkbBinding {
-	struct wl_list link; // Seat.xkb_bindings
+	struct wl_list link;            // Seat.xkb_bindings
 	struct river_xkb_binding_v1 *obj;
 	struct Seat *seat;
+	void (*func)(const Arg *);
+	Arg arg;
+	bool enabled;
+};
 
-	void (*dispatch)(struct Seat *, union Arg);
-	union Arg arg;
-	enum BindingManageAction manage;  // What to do on next window_manage
+struct PointerBinding {
+	struct wl_list link;            // Seat.pointer_bindings
+	struct river_pointer_binding_v1 *obj;
+	struct Seat *seat;
+	void (*func)(const Arg *);
+	Arg arg;
+	bool enabled;
 };
 
 
-// Utility functions for bindings
+// Commands
 
-static void activate_space(struct Seat *seat, struct Space *space) {
-	if (space == NULL)
+void spawn(const Arg *arg) {
+	if (arg == NULL || arg->v == NULL)
 		return;
 
-	// If the Space isn't already active on any Output, yank it here
-	if (active_on_output(space) == NULL)
-		space->output = seat->focused->output;
-
-	if (space->output->active != space) {
-		struct Space *tmp = space->output->active;
-		space->output->active = space;
-		collect_space(tmp);
-	}
-	seat->focused = space;
-}
-
-static void move_to_space(struct Window *window, struct Space *space) {
-	if (window == NULL || space == NULL)
-		return;
-
-	struct Space *old_space = window->space;
-	struct Window *old_focused = space->focused;
-
-	replace_window(window);
-
-	window->space = space;
-	space->focused = window;
-	bsp_insert_window(space, window, old_focused);
-
-	// If the window was the last one in the old space, collect it
-	if (old_space != NULL)
-		collect_space(old_space);
-}
-
-static struct Window *next_window(struct Window *window, struct wl_list *list) {
-	if (window == NULL)
-		return NULL;
-	if (list == NULL)
-		list = &window->link;
-
-	struct Window *w;
-	wl_list_for_each(w, list, link)
-		if (w->space == window->space)
-			return w;
-	return NULL;
-}
-
-static struct Window *prev_window(struct Window *window, struct wl_list *list) {
-	if (window == NULL)
-		return NULL;
-	if (list == NULL)
-		list = &window->link;
-
-	struct Window *w;
-	wl_list_for_each_reverse(w, list, link)
-		if (w->space == window->space)
-			return w;
-	return NULL;
-}
-
-static struct Space *nth_space(int n) {
-	int i = 0;
-	struct Space *space;
-	wl_list_for_each(space, &wm.spaces, link)
-		if ((++i) == n)
-			return space;
-	return NULL;
-}
-
-static struct Space *next_space(struct Space *space, bool (*filter)(struct Space *)) {
-	struct Space *target;
-	wl_list_for_each(target, &space->link, link) {
-		if (&target->link == &wm.spaces)
-			continue;
-		if (filter(target))
-			return target;
-	}
-	return NULL;
-}
-
-static struct Space *prev_space(struct Space *space, bool (*filter)(struct Space *)) {
-	struct Space *target;
-	wl_list_for_each_reverse(target, &space->link, link) {
-		if (&target->link == &wm.spaces)
-			continue;
-		if (filter(target))
-			return target;
-	}
-	return NULL;
-}
-// Binding function definitions
-// None of these functions run during a manage or render sequence
-
-extern void binding_spawn(struct Seat *seat, union Arg arg) {
-	struct sigaction sa;
 	if (fork() == 0) {
+		struct sigaction sa;
 		setsid();
 
 		sigemptyset(&sa.sa_mask);
@@ -138,222 +43,402 @@ extern void binding_spawn(struct Seat *seat, union Arg arg) {
 		sa.sa_handler = SIG_DFL;
 		sigaction(SIGCHLD, &sa, NULL);
 
-		execvp((const char *)arg.v[0], (char *const *)arg.v);
-		exit(12);  // Just in case
+		execvp(((char *const *)arg->v)[0], (char *const *)arg->v);
+		exit(EXIT_FAILURE);
 	}
 }
 
-extern void binding_exit(struct Seat *seat, union Arg arg) {
-	river_window_manager_v1_exit_session(window_manager_v1);
+void quit(const Arg *arg) {
+	if (window_manager_v1 != NULL)
+		river_window_manager_v1_exit_session(window_manager_v1);
 }
 
-extern void binding_close(struct Seat *seat, union Arg arg) {
-	if (seat->focused->focused != NULL)
-		seat->focused->focused->close = true;
+void killclient(const Arg *arg) {
+	if (selmon != NULL && selmon->sel != NULL)
+		selmon->sel->need_close = true;
 }
 
-extern void binding_toggle_fake_fullscreen(struct Seat *seat, union Arg arg) {
-	struct Window *window = seat->focused->focused;
-	if (window == NULL)
-		return;
-	if (window->fake_fullscreen)
-		window->exit_fullscreen = true;
-	else
-		window->enter_fake_fullscreen = true;
-}
-
-extern void binding_toggle_fullscreen(struct Seat *seat, union Arg arg) {
-	struct Window *window = seat->focused->focused;
-	if (window == NULL)
-	return;
-	if (window->fullscreen)
-		window->exit_fullscreen = true;
-	else
-		window->enter_fullscreen = true;
-}
-
-extern void binding_toggle_monocle(struct Seat *seat, union Arg arg) {
-	struct Space *space = seat->focused;
-	if (space->layout != monocle_layout)
-		space->layout = monocle_layout;
-	else
-		space->layout = default_layout;
-}
-
-extern void binding_focus_next(struct Seat *seat, union Arg arg) {
-	struct Window *window = next_window(seat->focused->focused, NULL);
-	if (window == NULL)
-		return;
-	seat->focused->focused = window;
-	seat->warp = true;
-}
-
-extern void binding_focus_prev(struct Seat *seat, union Arg arg) {
-	struct Window *window = prev_window(seat->focused->focused, NULL);
-	if (window == NULL)
-		return;
-	seat->focused->focused = window;
-	seat->warp = true;
-}
-
-extern void binding_move_next(struct Seat *seat, union Arg arg) {
-	struct Window *window = seat->focused->focused;
-	struct Window *target = next_window(window, NULL);
-	if (window == NULL || target == NULL)
+void setlayout(const Arg *arg) {
+	if (selmon == NULL)
 		return;
 
-	bool to_first = (target == next_window(window, &wm.windows));
-	wl_list_remove(&window->link);
-	if (to_first)
-		wl_list_insert(&wm.windows, &window->link);
-	else
-		wl_list_insert(&target->link, &window->link);
-	seat->warp = true;
-}
-
-extern void binding_move_prev(struct Seat *seat, union Arg arg) {
-	struct Window *window = seat->focused->focused;
-	struct Window *target = prev_window(window, NULL);
-	if (window == NULL || target == NULL)
+	if (arg != NULL && arg->v != NULL) {
+		selmon->lt = arg->v;
 		return;
-
-	bool to_last = (target == prev_window(window, &wm.windows));
-	wl_list_remove(&window->link);
-	if (to_last)
-		wl_list_insert(wm.windows.prev, &window->link);
-	else
-		wl_list_insert(target->link.prev, &window->link);
-	seat->warp = true;
-}
-
-extern void binding_activate_space(struct Seat *seat, union Arg arg) {
-	activate_space(seat, nth_space(arg.i));
-}
-
-extern void binding_activate_next_busy_space(struct Seat *seat, union Arg arg) {
-	activate_space(seat, next_space(seat->focused, busy_space));
-}
-
-extern void binding_activate_next_idle_space(struct Seat *seat, union Arg arg) {
-	struct Space *space = next_space(seat->focused, idle_space);
-	if (space == NULL) {
-		space = create_space();
-		wl_list_insert(wm.spaces.prev, &space->link);
 	}
-	activate_space(seat, space);
+
+	// Mod+Space cycles through the layouts, as is customary.
+	int i;
+	for (i = 0; i < layouts_len; i++)
+		if (selmon->lt == &layouts[i])
+			break;
+	selmon->lt = &layouts[(i + 1) % layouts_len];
 }
 
-extern void binding_activate_next_space(struct Seat *seat, union Arg arg) {
-	activate_space(seat, next_space(seat->focused, any_space));
+void setmfact(const Arg *arg) {
+	if (selmon == NULL || arg == NULL || selmon->lt->arrange == NULL)
+		return;
+
+	float f = arg->f < 1.0f ? selmon->mfact + arg->f : arg->f;
+	if (f < 0.05f || f > 0.95f)
+		return;
+	selmon->mfact = f;
 }
 
-extern void binding_activate_prev_busy_space(struct Seat *seat, union Arg arg) {
-	activate_space(seat, prev_space(seat->focused, busy_space));
+void incnmaster(const Arg *arg) {
+	if (selmon == NULL || arg == NULL)
+		return;
+	selmon->nmaster = MAX(0, selmon->nmaster + arg->i);
 }
 
-extern void binding_activate_prev_idle_space(struct Seat *seat, union Arg arg) {
-	struct Space *space = prev_space(seat->focused, idle_space);
-	if (space == NULL) {
-		space = create_space();
-		wl_list_insert(&wm.spaces, &space->link);
+// dwm's zoom(): swap the focused client with the master by moving it to the top
+// of the tiling order.  Focusing alone never does this.
+void zoom(const Arg *arg) {
+	if (selmon == NULL || selmon->sel == NULL)
+		return;
+
+	struct Client *c = selmon->sel;
+	if (!is_visible(c) || selmon->lt->arrange == NULL)
+		return;
+
+	// dwm: if the focused window is already master, zoom the next tiled
+	// client instead, so Mod+Return always does something.
+	if (c == next_tiled(selmon, NULL)) {
+		c = next_tiled(selmon, c);
+		if (c == NULL)
+			return;
 	}
-	activate_space(seat, space);
+
+	wl_list_remove(&c->link);
+	wl_list_insert(&wm.clients, &c->link);
 }
 
-extern void binding_activate_prev_space(struct Seat *seat, union Arg arg) {
-	activate_space(seat, prev_space(seat->focused, any_space));
-}
+void togglefloating(const Arg *arg) {
+	if (selmon == NULL || selmon->sel == NULL)
+		return;
 
-// Move the currently focused Window to the nth Space
-extern void binding_move_to_space(struct Seat *seat, union Arg arg) {
-	move_to_space(seat->focused->focused, nth_space(arg.i));
-}
+	struct Client *c = selmon->sel;
+	c->isfloating = !c->isfloating || c->fullscreen;
 
-extern void binding_move_to_next_space(struct Seat *seat, union Arg arg) {
-	move_to_space(seat->focused->focused, next_space(seat->focused, any_space));
-}
-
-extern void binding_move_to_prev_space(struct Seat *seat, union Arg arg) {
-	move_to_space(seat->focused->focused, prev_space(seat->focused, any_space));
-}
-
-extern void binding_move_to_next_idle_space(struct Seat *seat, union Arg arg) {
-	struct Space *space = next_space(seat->focused, idle_space);
-	if (space == NULL) {
-		space = create_space();
-		wl_list_insert(wm.spaces.prev, &space->link);
+	if (c->isfloating) {
+		c->geom = client_render_rect(c);
+		if (c->geom.width <= 0 || c->geom.height <= 0)
+			center_client(c);
+	} else {
+		// Force arrange() to propose dimensions again.
+		c->proposed_width = -1;
+		c->proposed_height = -1;
 	}
-	move_to_space(seat->focused->focused, space);
+}
+
+void setfullscreen(struct Client *c, bool fullscreen) {
+	if (c == NULL || c->mon == NULL || c->fullscreen == fullscreen)
+		return;
+
+	if (fullscreen) {
+		c->wasfloating = c->isfloating;
+		c->oldgeom = client_render_rect(c);
+		c->isfloating = true;
+		c->fullscreen = true;
+		c->need_fullscreen = true;
+	} else {
+		c->fullscreen = false;
+		c->need_exit_fullscreen = true;
+		c->isfloating = c->wasfloating;
+		c->proposed_width = -1;
+		c->proposed_height = -1;
+	}
+}
+
+void togglefullscreen(const Arg *arg) {
+	if (selmon == NULL || selmon->sel == NULL)
+		return;
+	setfullscreen(selmon->sel, !selmon->sel->fullscreen);
+}
+
+static struct Client *stack_next(struct Client *c, int dir) {
+	struct wl_list *start = &c->slink;
+	struct wl_list *pos = dir > 0 ? start->next : start->prev;
+
+	while (pos != start) {
+		struct Client *w = wl_container_of(pos, w, slink);
+		if (w->mon == selmon && is_visible(w))
+			return w;
+		pos = dir > 0 ? pos->next : pos->prev;
+	}
+	return NULL;
+}
+
+void focusstack(const Arg *arg) {
+	if (selmon == NULL)
+		return;
+
+	struct Client *c = selmon->sel;
+	if (c == NULL) {
+		focus(NULL);
+		return;
+	}
+
+	// Walk the focus stack (not the tiling order), exactly like dwm.
+	struct Client *w = stack_next(c, arg->i);
+	if (w != NULL) {
+		focus(w);
+		if (current_seat != NULL)
+			current_seat->warp = true;
+	}
+}
+
+void focusmon(const Arg *arg) {
+	if (selmon == NULL || wl_list_empty(&wm.monitors))
+		return;
+
+	struct Monitor *m = next_monitor(selmon, arg->i);
+	if (m == NULL || m == selmon)
+		return;
+
+	selmon = m;
+	m->sel = first_visible(m);
+	focus(m->sel);
+}
+
+void tagmon(const Arg *arg) {
+	if (selmon == NULL || selmon->sel == NULL)
+		return;
+
+	struct Client *c = selmon->sel;
+	struct Monitor *m = next_monitor(selmon, arg->i);
+	if (m == NULL || m == c->mon)
+		return;
+
+	if (c->fullscreen) {
+		c->fullscreen = false;
+		c->need_exit_fullscreen = true;
+		c->isfloating = c->wasfloating;
+	}
+
+	c->mon = m;
+	c->tags = m->tagset[m->seltags];
+	c->proposed_width = -1;
+	c->proposed_height = -1;
+	c->pos_valid = false;
+
+	selmon = m;
+	wl_list_remove(&c->link);
+	wl_list_insert(&wm.clients, &c->link);
+	wl_list_remove(&c->slink);
+	wl_list_insert(&wm.stack, &c->slink);
+	m->sel = c;
+	focus(c);
+}
+
+void view(const Arg *arg) {
+	if (selmon == NULL)
+		return;
+
+	if ((arg->ui & tagmask) == selmon->tagset[selmon->seltags])
+		return;
+
+	selmon->seltags ^= 1;
+	if (arg->ui & tagmask)
+		selmon->tagset[selmon->seltags] = arg->ui & tagmask;
+}
+
+void tag(const Arg *arg) {
+	if (selmon == NULL || selmon->sel == NULL)
+		return;
+	if (arg->ui & tagmask)
+		selmon->sel->tags = arg->ui & tagmask;
+}
+
+void toggleview(const Arg *arg) {
+	if (selmon == NULL)
+		return;
+	selmon->tagset[selmon->seltags] ^= arg->ui & tagmask;
+}
+
+void toggletag(const Arg *arg) {
+	if (selmon == NULL || selmon->sel == NULL)
+		return;
+	selmon->sel->tags ^= arg->ui & tagmask;
 }
 
 
-// "Core" functions defining and dispatching bindings
+// Interactive move/resize
 
-static void xkb_binding_handle_pressed(void *data, struct river_xkb_binding_v1 *obj) {
-	struct XkbBinding *binding = data;
-	binding->dispatch(binding->seat, binding->arg);
+static void start_op(struct Client *c, int mode) {
+	struct Seat *seat = current_seat;
+	if (seat == NULL || seat->op_mode != OpNone)
+		return;
+
+	seat->op_client = c;
+	seat->op_mode = mode;
+	seat->op_geom = c->geom;
+	seat->op_dx = 0;
+	seat->op_dy = 0;
+	seat->op_start_pending = true;
+	seat->op_end_pending = false;
 }
 
-static void xkb_binding_handle_released(void *data, struct river_xkb_binding_v1 *obj) {}
+void movemouse(const Arg *arg) {
+	if (selmon == NULL || selmon->sel == NULL
+			|| selmon->sel->fullscreen)
+		return;
+
+	struct Client *c = selmon->sel;
+
+	// Dragging a tiled window tears it out of the layout, like the
+	// tile_drag patch for dwm.
+	if (!c->isfloating) {
+		c->geom = client_render_rect(c);
+		c->isfloating = true;
+	}
+	start_op(c, OpMove);
+}
+
+void resizemouse(const Arg *arg) {
+	if (selmon == NULL || selmon->sel == NULL
+			|| selmon->sel->fullscreen)
+		return;
+
+	struct Client *c = selmon->sel;
+
+	if (!c->isfloating) {
+		c->geom = client_render_rect(c);
+		c->isfloating = true;
+	}
+	start_op(c, OpResize);
+}
+
+void op_cancel(struct Seat *seat) {
+	seat->op_client = NULL;
+	seat->op_start_pending = false;
+	seat->op_end_pending = true;
+	seat->op_dx = 0;
+	seat->op_dy = 0;
+}
+
+
+// Binding plumbing
+
+static void xkb_binding_handle_pressed(void *data,
+		struct river_xkb_binding_v1 *obj) {
+	struct XkbBinding *b = data;
+	current_seat = b->seat;
+	if (b->func != NULL)
+		b->func(&b->arg);
+	manage_dirty();
+}
+
+static void xkb_binding_handle_released(void *data,
+		struct river_xkb_binding_v1 *obj) {}
 
 const struct river_xkb_binding_v1_listener river_xkb_binding_listener = {
 	.pressed = xkb_binding_handle_pressed,
 	.released = xkb_binding_handle_released,
 };
 
-static void xkb_binding_create(struct Seat *seat, uint32_t mods, xkb_keysym_t keysym, void (*dispatch)(struct Seat *seat, union Arg arg), union Arg arg) {
-	struct XkbBinding *binding = calloc(1, sizeof(struct XkbBinding));
-	binding->obj = river_xkb_bindings_v1_get_xkb_binding(xkb_bindings_v1, seat->obj, keysym, mods);
-	binding->seat = seat;
-	binding->dispatch = dispatch;
-	binding->arg = arg;
-	binding->manage = BINDING_MANAGE_ENABLE;
-
-	river_xkb_binding_v1_add_listener(binding->obj, &river_xkb_binding_listener, binding);
-	wl_list_insert(&seat->xkb_bindings, &binding->link);
+static void pointer_binding_handle_pressed(void *data,
+		struct river_pointer_binding_v1 *obj) {
+	struct PointerBinding *b = data;
+	current_seat = b->seat;
+	if (b->func != NULL)
+		b->func(&b->arg);
+	manage_dirty();
 }
 
-extern void init_xkb_bindings(struct Seat *seat) {
-	int i;
-	for (i = 0; binds[i].dispatch != NULL; i++)
-		xkb_binding_create(seat, binds[i].mod, binds[i].key,
-				binds[i].dispatch, binds[i].arg);
+static void pointer_binding_handle_released(void *data,
+		struct river_pointer_binding_v1 *obj) {}
+
+const struct river_pointer_binding_v1_listener river_pointer_binding_listener = {
+	.pressed = pointer_binding_handle_pressed,
+	.released = pointer_binding_handle_released,
+};
+
+void init_bindings(struct Seat *seat) {
+	size_t i;
+
+	for (i = 0; keys[i].func != NULL; i++) {
+		struct XkbBinding *b = calloc(1, sizeof(*b));
+		if (b == NULL)
+			return;
+		b->obj = river_xkb_bindings_v1_get_xkb_binding(xkb_bindings_v1,
+				seat->obj, keys[i].key, keys[i].mod);
+		b->seat = seat;
+		b->func = keys[i].func;
+		b->arg = keys[i].arg;
+		river_xkb_binding_v1_add_listener(b->obj,
+				&river_xkb_binding_listener, b);
+		wl_list_insert(&seat->xkb_bindings, &b->link);
+	}
+
+	for (i = 0; buttons[i].func != NULL; i++) {
+		struct PointerBinding *b = calloc(1, sizeof(*b));
+		if (b == NULL)
+			return;
+		b->obj = river_seat_v1_get_pointer_binding(seat->obj,
+				buttons[i].button, buttons[i].mod);
+		b->seat = seat;
+		b->func = buttons[i].func;
+		b->arg = buttons[i].arg;
+		river_pointer_binding_v1_add_listener(b->obj,
+				&river_pointer_binding_listener, b);
+		wl_list_insert(&seat->pointer_bindings, &b->link);
+	}
 }
 
-extern void manage_xkb_bindings(struct Seat *seat) {
-	struct XkbBinding *binding;
-	wl_list_for_each(binding, &seat->xkb_bindings, link) {
-		switch (binding->manage) {
-		case BINDING_MANAGE_ENABLE:
-			river_xkb_binding_v1_enable(binding->obj);
-			break;
-		case BINDING_MANAGE_DISABLE:
-			river_xkb_binding_v1_disable(binding->obj);
-			break;
-		case BINDING_MANAGE_NONE:
-			break;
+void manage_bindings(struct Seat *seat) {
+	struct XkbBinding *xb;
+	struct PointerBinding *pb;
+
+	wl_list_for_each(xb, &seat->xkb_bindings, link) {
+		if (seat->locked && xb->enabled) {
+			river_xkb_binding_v1_disable(xb->obj);
+			xb->enabled = false;
+		} else if (!seat->locked && !xb->enabled) {
+			river_xkb_binding_v1_enable(xb->obj);
+			xb->enabled = true;
 		}
-		binding->manage = BINDING_MANAGE_NONE;
+	}
+	wl_list_for_each(pb, &seat->pointer_bindings, link) {
+		if (seat->locked) {
+			if (!pb->enabled)
+				continue;
+			river_pointer_binding_v1_disable(pb->obj);
+			pb->enabled = false;
+		} else {
+			if (pb->enabled)
+				continue;
+			river_pointer_binding_v1_enable(pb->obj);
+			pb->enabled = true;
+		}
 	}
 }
 
-extern void remove_xkb_bindings(struct Seat *seat) {
-	struct XkbBinding *binding, *tmp;
-	wl_list_for_each_safe(binding, tmp, &seat->xkb_bindings, link) {
-		river_xkb_binding_v1_destroy(binding->obj);
-		wl_list_remove(&binding->link);
-		free(binding);
+void remove_bindings(struct Seat *seat) {
+	struct XkbBinding *xb, *xtmp;
+	struct PointerBinding *pb, *ptmp;
+
+	wl_list_for_each_safe(xb, xtmp, &seat->xkb_bindings, link) {
+		river_xkb_binding_v1_destroy(xb->obj);
+		wl_list_remove(&xb->link);
+		free(xb);
+	}
+	wl_list_for_each_safe(pb, ptmp, &seat->pointer_bindings, link) {
+		river_pointer_binding_v1_destroy(pb->obj);
+		wl_list_remove(&pb->link);
+		free(pb);
 	}
 }
 
-extern void lock_xkb_bindings(struct Seat *seat) {
-	struct XkbBinding *binding;
-	wl_list_for_each(binding, &seat->xkb_bindings, link)
-		binding->manage = BINDING_MANAGE_DISABLE;
+void lock_bindings(struct Seat *seat) {
+	// The actual disable requests happen during the next manage sequence.
+	seat->locked = true;
+	seat->bindings_dirty = true;
+	manage_dirty();
 }
 
-extern void unlock_xkb_bindings(struct Seat *seat) {
-	struct XkbBinding *binding;
-	wl_list_for_each(binding, &seat->xkb_bindings, link)
-		binding->manage = BINDING_MANAGE_ENABLE;
+void unlock_bindings(struct Seat *seat) {
+	seat->locked = false;
+	seat->bindings_dirty = true;
+	manage_dirty();
 }

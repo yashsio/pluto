@@ -3,3 +3,4 @@ config.h
 protocol/*.c
 protocol/*.h
 *.o
+result

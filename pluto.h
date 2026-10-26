@@ -1,16 +1,35 @@
-// pluto.h -- Header file for Pluto (fork of JrWM).
+// pluto.h -- Header file for Pluto, a dwm-like window manager for river.
 //
 // Copyright 2026 Isaac Freund, 2026 Jack Conger.  See LICENSE for details.
 // Copyright 2026 Yash Sharma.  See LICENSE for details.
+//
+// The client/monitor model deliberately mirrors dwm: clients carry a tag
+// bitmask, each monitor has two tag sets (so Mod+Tab can flip back), and the
+// layout is master/stack instead of a BSP tree.
 
 #ifndef PLUTO_H
 #define PLUTO_H
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include <wayland-client.h>
+#include <xkbcommon/xkbcommon.h>
 
 #include <river-layer-shell-v1.h>
+#include <river-libinput-config-v1.h>
 #include <river-window-management-v1.h>
 #include <river-xkb-bindings-v1.h>
+
+#define LENGTH(X) (sizeof (X) / sizeof (X)[0])
+#define MAX(A, B) ((A) > (B) ? (A) : (B))
+#define MIN(A, B) ((A) < (B) ? (A) : (B))
+
+#define EDGES_ALL (RIVER_WINDOW_V1_EDGES_TOP | \
+		RIVER_WINDOW_V1_EDGES_BOTTOM | \
+		RIVER_WINDOW_V1_EDGES_LEFT | \
+		RIVER_WINDOW_V1_EDGES_RIGHT)
 
 
 // Types
@@ -19,208 +38,255 @@ struct Rect {
 	int32_t x, y, width, height;
 };
 
-// Binary Space Partitioning node for the tiled layout.
-// Internal nodes represent a split; leaves hold a window.
-struct BspNode {
-	struct BspNode *parent;
-	struct BspNode *first;   // left/top child
-	struct BspNode *second;  // right/bottom child
-	struct Window *window;   // non-null only for leaves
-	bool vertical;           // split direction (internal nodes only)
-	float ratio;             // split ratio (internal nodes only)
-};
+struct Monitor;
+struct Client;
 
-// A Space represents a collection of Windows on an Output with a layout.
-// Space is the "clearing-house" type for the WM; there MUST be at least one
-// Space for everything else to point at, and there SHOULD be at least one Space
-// per Output.
-struct Space {
-	struct wl_list link;    // WindowManager.spaces
-	struct Output *output;  // May be null
-	struct Window *focused; // May be null
+// A layout is identified by its symbol and the function that arranges the
+// tiled clients of a monitor.  A null arrange function means "floating":
+// clients keep whatever geometry they have.
+typedef struct {
+	const char *symbol;
+	void (*arrange)(struct Monitor *);
+} Layout;
 
-	bool is_static;         // Static spaces are never removed
+// Argument passing, exactly like dwm.
+typedef union {
+	int i;
+	unsigned int ui;
+	float f;
+	const void *v;
+} Arg;
 
-	void (*layout)(struct Space *space, struct Rect bounds);
-	struct BspNode *bsp_root;
-};
+typedef struct {
+	unsigned int mod;
+	xkb_keysym_t key;
+	void (*func)(const Arg *);
+	const Arg arg;
+} Key;
 
-// An Output is like an actual physical display.
-struct Output {
-	struct wl_list link;    // WindowManager.outputs
-	struct river_output_v1 *obj;
-	struct river_layer_shell_output_v1 *ls;
+typedef struct {
+	unsigned int mod;
+	unsigned int button;
+	void (*func)(const Arg *);
+	const Arg arg;
+} Button;
 
-	struct Rect real, windowed;
+// A rule is applied to a client once its app_id/title is known.
+typedef struct {
+	const char *app_id;   // NULL matches anything
+	const char *title;    // NULL matches anything
+	unsigned int tags;    // 0 means "keep current tags"
+	bool isfloating;
+	int monitor;          // -1 means "keep current monitor"
+} Rule;
 
-	struct Space *active;   // Non-null
-};
-
-// A Window is a rectangle under management.
-struct Window {
-	struct wl_list link;    // WindowManager.windows
+// A Client is a window under management.
+struct Client {
+	// dwm keeps two orders: the client list decides the tiling order (head is
+	// the master), the stack list decides focus/stacking order (head is the
+	// most recently focused).  Focusing must not change the layout, so they
+	// have to stay separate.
+	struct wl_list link;            // WindowManager.clients, head = master
+	struct wl_list slink;           // WindowManager.stack, head = most recently focused
 	struct river_window_v1 *obj;
 	struct river_node_v1 *node;
 
-	bool maximized;  // The window has been inform_maximized
-	bool fullscreen; // The window is fullscreen
-	bool fake_fullscreen; // The window acts as if fullscreen
+	struct Monitor *mon;            // May be null briefly (e.g. no outputs)
+	unsigned int tags;              // Tag bitmask, like dwm
 
-	// Deferred tasks for the manage sequence
-	bool set_capabilities;  // window_v1.set_capabilities
-	bool close;             // window_v1.close
-	bool enter_fullscreen;  // window_v1.inform_fullscreen
-	bool exit_fullscreen;   // window_v1.inform_not_fullscreen
-	bool enter_fake_fullscreen;
+	bool isfloating;
+	bool wasfloating;               // Floating state to restore on unfullscreen
+	bool fullscreen;
+	bool geom_valid;                // We have received dimensions at least once
+	bool rules_applied;
 
-	// Information for the render sequence
-	struct Rect layout;
+	struct Rect geom;               // Content geometry in logical coordinates
+	struct Rect oldgeom;            // Geometry to restore when leaving fullscreen
+	struct Rect slot;               // Tiled slot (content + border) assigned by arrange
+	int bw;                         // Border width
 
-	struct Space *space;    // Non-null
+	char *app_id;
+	char *title;
+
+	// Work deferred to the next manage sequence.
+	bool need_capabilities;
+	bool need_ssd;
+	bool need_close;
+	bool need_fullscreen;
+	bool need_exit_fullscreen;
+	int tiled;                      // Last value passed to set_tiled, -1 = unknown
+	int32_t proposed_width;         // Last propose_dimensions, to avoid protocol loops
+	int32_t proposed_height;
+
+	// Cached rendering state.  Only send a request when the value changes,
+	// otherwise every render sequence floods the compositor with no-op
+	// requests (the main source of input lag).
+	bool shown;                     // Last show/hide state
+	bool pos_valid;
+	int32_t pos_x, pos_y;           // Last set_position
+	bool border_valid;
+	bool border_focused;
+	int border_width_set;
+};
+
+// A Monitor is an output.
+struct Monitor {
+	struct wl_list link;            // WindowManager.monitors, ordered by position
+	struct river_output_v1 *obj;
+	struct river_layer_shell_output_v1 *ls;
+	struct wl_output *wl_output;    // for the name, exposed over IPC
+	char name[64];
+
+	struct Rect real;               // Full output geometry
+	struct Rect windowed;           // Non-exclusive area (excludes bars, etc.)
+
+	unsigned int tagset[2];         // Selected tags, like dwm
+	unsigned int seltags;
+	float mfact;
+	int nmaster;
+	const Layout *lt;
+
+	struct Client *sel;
 };
 
 // A Seat is a collection of input devices.
 struct Seat {
-	struct wl_list link;    // WindowManager.seats
+	struct wl_list link;            // WindowManager.seats
 	struct river_seat_v1 *obj;
 	struct river_layer_shell_seat_v1 *ls;
-	struct wl_list xkb_bindings;  // XkbBinding
+	struct wl_list xkb_bindings;    // XkbBinding
+	struct wl_list pointer_bindings; // PointerBinding
 
-	bool warp;              // Warp pointer to focused window
-	bool moved;             // The pointer has moved since last manage
-	struct Window *entered; // This window has been entered
+	struct Client *entered;         // Window under the pointer
+	bool warp;                      // Warp the pointer to the focused window
+	bool ls_focused;                // A layer shell surface (e.g. a launcher) has focus
+	bool locked;                    // Session is locked: bindings are disabled
+	bool bindings_dirty;            // Binding enable/disable state needs syncing
 
-	bool ls_focused;        // Layer shell surface has focus
-	struct Space *focused;  // Non-null
+	// Last value passed to river_seat_v1_focus_window.  Re-sending it on
+	// every manage sequence needlessly resets keyboard focus.
+	struct Client *focus_client;
+	bool focus_cleared;
+
+	// Interactive move/resize, driven by op_delta events.
+	struct Client *op_client;
+	int op_mode;
+	bool op_start_pending;
+	bool op_end_pending;
+	int32_t op_dx, op_dy;
+	struct Rect op_geom;
 };
 
-// Args and Binddefs are used to configure XkbBindings
-union Arg {
-	char **v;
-	int32_t i;
-	float f;
-};
-
-struct Binddef {
-	int32_t mod, key;
-	void (*dispatch)(struct Seat *, union Arg);
-	union Arg arg;
+enum {
+	OpNone,
+	OpMove,
+	OpResize,
 };
 
 struct WindowManager {
-	struct wl_list outputs; // Output
-	struct wl_list windows; // Window
-	struct wl_list seats;   // Seat
-	struct wl_list spaces;  // Space
+	struct wl_list monitors;        // Monitor
+	struct wl_list clients;         // Client, tiling order
+	struct wl_list stack;           // Client, focus order
+	struct wl_list seats;           // Seat
 };
 
 
 // pluto.c
 
 extern struct WindowManager wm;
+extern struct Monitor *selmon;
+extern struct Seat *current_seat;   // Seat dispatching a binding
 
 extern struct river_window_manager_v1 *window_manager_v1;
 extern struct river_xkb_bindings_v1 *xkb_bindings_v1;
 extern struct river_layer_shell_v1 *layer_shell_v1;
 
-extern bool idle_space(struct Space *);
-extern bool busy_space(struct Space *);
-extern bool any_space(struct Space *);
-extern struct Output *active_on_output(struct Space *);
-extern struct Space *create_space(void);
-extern void collect_space(struct Space *);
+struct Monitor *first_monitor(void);
+struct Monitor *next_monitor(struct Monitor *m, int dir);
+struct Client *next_tiled(struct Monitor *m, struct Client *c);
+struct Client *first_visible(struct Monitor *m);
+struct Client *visible_fullscreen(struct Monitor *m);
+struct Rect client_render_rect(struct Client *c);
+
+bool is_visible(struct Client *c);
+
+void arrange(struct Monitor *m);
+void arrange_all(void);
+void focus(struct Client *c);
+void restack(void);
+void render(void);
+void applyrules(struct Client *c);
+void center_client(struct Client *c);
+void manage_dirty(void);
+
+// layout.c: the layouts referenced from config.h
+void tile(struct Monitor *m);
+void monocle(struct Monitor *m);
 
 
-// layout.c
+// bindings.c: dwm's key/button handlers
 
-// Layout functions
-extern void bsp_layout(struct Space *, struct Rect);
-extern void monocle_layout(struct Space *, struct Rect);
+void setfullscreen(struct Client *c, bool fullscreen);
 
-// BSP tree management
-extern void bsp_insert_window(struct Space *, struct Window *, struct Window *);
-extern void bsp_remove_window(struct Space *, struct Window *);
-extern void bsp_free_tree(struct BspNode *);
+void spawn(const Arg *arg);
+void quit(const Arg *arg);
+void killclient(const Arg *arg);
+void setlayout(const Arg *arg);
+void setmfact(const Arg *arg);
+void incnmaster(const Arg *arg);
+void zoom(const Arg *arg);
+void togglefloating(const Arg *arg);
+void togglefullscreen(const Arg *arg);
+void focusstack(const Arg *arg);
+void focusmon(const Arg *arg);
+void tagmon(const Arg *arg);
+void view(const Arg *arg);
+void tag(const Arg *arg);
+void toggleview(const Arg *arg);
+void toggletag(const Arg *arg);
+void movemouse(const Arg *arg);
+void resizemouse(const Arg *arg);
 
-// Called on creation of objects to manage internal pointers
-extern void place_output(struct Output *);
-extern void place_window(struct Window *);
-extern void place_seat(struct Seat *);
-
-// Called on deletion of objects
-extern void replace_output(struct Output *);
-extern void replace_window(struct Window *);
-
-// Called during the manage sequence
-extern void manage_window_deferred(struct Window *);
-extern void manage_space(struct Space *);
-extern void manage_seat_focus(struct Seat *);
-
-// Called during the render sequence
-extern void render_space(struct Space *);
-extern void render_seat_focus(struct Seat *);
-
-
-// bindings.c
-
-// Binding functions which may be called from Binddefs
-extern void binding_spawn(struct Seat *, union Arg);
-extern void binding_exit(struct Seat *, union Arg);
-extern void binding_close(struct Seat *, union Arg);
-
-extern void binding_toggle_fake_fullscreen(struct Seat *, union Arg);
-extern void binding_toggle_fullscreen(struct Seat *, union Arg);
-extern void binding_toggle_monocle(struct Seat *, union Arg);
-
-extern void binding_focus_next(struct Seat *, union Arg);
-extern void binding_focus_prev(struct Seat *, union Arg);
-extern void binding_move_next(struct Seat *, union Arg);
-extern void binding_move_prev(struct Seat *, union Arg);
-
-// Bindings for relative movement around spaces
-// A "busy" space is one with any windows.  An "idle" space is one which has no
-// windows and is not active on any output.
-extern void binding_activate_next_space(struct Seat *, union Arg);
-extern void binding_activate_prev_space(struct Seat *, union Arg);
-extern void binding_activate_next_busy_space(struct Seat *, union Arg);
-extern void binding_activate_prev_busy_space(struct Seat *, union Arg);
-extern void binding_activate_next_idle_space(struct Seat *, union Arg);
-extern void binding_activate_prev_idle_space(struct Seat *, union Arg);
-
-extern void binding_move_to_next_space(struct Seat *, union Arg);
-extern void binding_move_to_prev_space(struct Seat *, union Arg);
-extern void binding_move_to_next_idle_space(struct Seat *, union Arg);
-
-// Bindings for statically-numbered spaces
-extern void binding_activate_space(struct Seat *, union Arg);
-extern void binding_move_to_space(struct Seat *, union Arg);
-
-// Functions used to manage bindings
-extern void init_xkb_bindings(struct Seat *);
-extern void manage_xkb_bindings(struct Seat *);
-extern void remove_xkb_bindings(struct Seat *);
-extern void lock_xkb_bindings(struct Seat *);
-extern void unlock_xkb_bindings(struct Seat *);
+void init_bindings(struct Seat *seat);
+void manage_bindings(struct Seat *seat);
+void remove_bindings(struct Seat *seat);
+void lock_bindings(struct Seat *seat);
+void unlock_bindings(struct Seat *seat);
+void op_cancel(struct Seat *seat);
 
 
-// config.c
+// input.c: libinput device configuration (river delegates it to the WM)
+//
+// The global is optional: older river versions do not have it.
 
-extern int static_spaces;
-extern void (*default_layout)(struct Space *, struct Rect);
+void init_input_config(struct wl_registry *registry, uint32_t name);
 
-extern uint32_t border_color[4];
-extern uint32_t focused_color[4];
 
-extern int monocle_borderpx;
+// config.c (config.h, included only by pluto.c)
 
-extern int border_width;
-extern int gaps_inner;
-extern int gaps_outer;
+extern int borderpx;
+extern uint32_t border_color_normal[4];
+extern uint32_t border_color_focus[4];
 
+extern float mfact;
+extern int nmaster;
+extern int gap_inner;
+extern int gap_outer;
+extern bool lockfullscreen;
 extern bool focus_follows_pointer;
 extern bool pointer_follows_focus;
 
-extern struct Binddef binds[];
+/* libinput: applied to every device that supports the setting */
+extern bool tap_to_click;
+extern bool tap_drag;
+extern bool natural_scroll;
 
+extern const Layout layouts[];
+extern const int layouts_len;
+extern const Rule rules[];
+extern const int rules_len;
+extern const Key keys[];
+extern const Button buttons[];
+extern const unsigned int tagmask;
 
 #endif
