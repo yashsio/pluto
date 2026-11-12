@@ -1,0 +1,192 @@
+From 5961468e6cf4d87ca7b9651499ac281d3bc83110 Mon Sep 17 00:00:00 2001
+From: Yash Sharma <296458454+yashsio@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 13:50:55 +0530
+Subject: [PATCH] feat: add dwm-style inner and outer gaps
+
+Arrange tiled clients inside an optional outer gap and separate neighbouring
+clients by an optional inner gap. Both default to 0, preserving the gapless
+dwm layout.
+---
+ README.md    |   4 ++-
+ config.def.h |   5 +++
+ pluto.c      | 100 +++++++++++++++++++++++++++++++++++++--------------
+ 3 files changed, 81 insertions(+), 28 deletions(-)
+
+diff --git a/README.md b/README.md
+index d346e12..a4ed961 100644
+--- a/README.md
++++ b/README.md
+@@ -32,7 +32,9 @@ Copy `config.def.h` to `config.h`, edit it, and rebuild:
+ 	make clean install
+ 
+ The default configuration uses Mod4 (the Windows key) as `MODKEY`, keeps
+-dwm's key bindings and tag model, and starts `foot` and `fuzzel`.
++dwm's key bindings and tag model, and starts `foot` and `fuzzel`.  The tiling
++layouts support dwm-style gaps: set `gap_inner` and `gap_outer` in
++`config.def.h` (both default to 0, which disables gaps).
+ 
+ ## License
+ 
+diff --git a/config.def.h b/config.def.h
+index bf307e1..4de8108 100644
+--- a/config.def.h
++++ b/config.def.h
+@@ -26,6 +26,11 @@ static const Rule rules[] = {
+ /* layout(s) */
+ static const float mfact     = 0.55f; /* factor of master area size [0.05..0.95] */
+ static const int nmaster     = 1;     /* number of clients in master area */
++
++/* gaps, in pixels; set either to 0 to disable that kind of gap */
++static const int gap_inner   = 0;     /* between neighbouring tiled clients */
++static const int gap_outer   = 0;     /* between the tiled area and the screen edges */
++
+ static const int lockfullscreen = 1;  /* 1 will force focus on the fullscreen window */
+ 
+ /* touchpad / libinput: river leaves device configuration to the WM */
+diff --git a/pluto.c b/pluto.c
+index d3c1510..798a5f9 100644
+--- a/pluto.c
++++ b/pluto.c
+@@ -205,6 +205,7 @@ static void render(void);
+ static void applyrules(Client *c);
+ 
+ static void place_tiled(Client *c, Rect r);
++static Rect gap_area(Monitor *m);
+ static void tile(Monitor *m);
+ static void monocle(Monitor *m);
+ 
+@@ -660,59 +661,104 @@ place_tiled(Client *c, Rect slot)
+ 	c->geom.y = slot.y + c->bw + (height - c->geom.height) / 2;
+ }
+ 
++/* The work area with the outer gap removed.  If the gap would leave no room,
++ * it is ignored rather than producing degenerate geometry. */
++static Rect
++gap_area(Monitor *m)
++{
++	Rect w = m->windowed;
++	int g = MAX(0, gap_outer);
++
++	if (w.width - 2 * g < 1 || w.height - 2 * g < 1)
++		g = 0;
++
++	w.x += g;
++	w.y += g;
++	w.width -= 2 * g;
++	w.height -= 2 * g;
++	return w;
++}
++
+ /* dwm's tile(): nmaster clients stacked in the master area on the left, the
+  * rest stacked in the remaining area on the right. */
+ static void
+ tile(Monitor *m)
+ {
+-	unsigned int i, n, h, mw, my, ty;
+ 	Client *c;
++	Rect w = gap_area(m);
++	int i, n, nmaster, stack_count, gi, mw, split, stack_x, stack_width;
++	int master_height, stack_height, y;
+ 
+ 	for (n = 0, c = nexttiled(m, NULL); c; c = nexttiled(m, c), n++)
+ 		;
+ 	if (n == 0)
+ 		return;
+ 
+-	if (n > (unsigned int)m->nmaster)
+-		mw = m->nmaster ? m->windowed.width * m->mfact : 0;
++	gi = MAX(0, gap_inner);
++	nmaster = MIN(n, m->nmaster);
++	stack_count = n - nmaster;
++
++	/* Never let the gaps eat the clients; fall back to gapless for this
++	 * arrange if there is not at least one pixel per client. */
++	if ((nmaster > 1 && w.height - (nmaster - 1) * gi < nmaster)
++			|| (stack_count > 1
++				&& w.height - (stack_count - 1) * gi < stack_count))
++		gi = 0;
++
++	if (stack_count > 0 && m->nmaster > 0 && w.width > gi)
++		mw = (int32_t)((w.width - gi) * m->mfact);
++	else if (stack_count > 0)
++		mw = 0;
+ 	else
+-		mw = m->windowed.width;
++		mw = w.width;
+ 
+-	for (i = my = ty = 0, c = nexttiled(m, NULL); c;
++	master_height = nmaster > 0
++		? (w.height - (nmaster - 1) * gi) / nmaster : 0;
++	stack_height = stack_count > 0
++		? (w.height - (stack_count - 1) * gi) / stack_count : 0;
++
++	split = stack_count > 0 && mw > 0;
++	stack_x = w.x + mw + (split ? gi : 0);
++	stack_width = MAX(1, w.width - mw - (split ? gi : 0));
++
++	for (i = 0, y = w.y, c = nexttiled(m, NULL); c;
+ 			c = nexttiled(m, c), i++) {
+-		if (i < (unsigned int)m->nmaster) {
+-			h = (m->windowed.height - my)
+-				/ (MIN(n, (unsigned int)m->nmaster) - i);
+-			place_tiled(c, (Rect){
+-				m->windowed.x,
+-				m->windowed.y + my,
+-				mw,
+-				h,
+-			});
+-			if (my + h < (unsigned int)m->windowed.height)
+-				my += h;
++		Rect slot;
++		int h;
++
++		if (i < nmaster) {
++			/* Give the last master client the leftover pixels so the
++			 * column exactly fills the work area. */
++			h = (i == nmaster - 1)
++				? (w.y + w.height - y) : master_height;
++			slot = (Rect){ w.x, y, mw, h };
++			y += h + gi;
+ 		} else {
+-			h = (m->windowed.height - ty) / (n - i);
+-			place_tiled(c, (Rect){
+-				m->windowed.x + mw,
+-				m->windowed.y + ty,
+-				m->windowed.width - mw,
+-				h,
+-			});
+-			if (ty + h < (unsigned int)m->windowed.height)
+-				ty += h;
++			int idx = i - nmaster;
++			int yy = w.y + idx * (stack_height + gi);
++
++			h = (idx == stack_count - 1)
++				? (w.y + w.height - yy) : stack_height;
++			slot = (Rect){ stack_x, yy, stack_width, h };
+ 		}
++		place_tiled(c, slot);
+ 	}
+ }
+ 
+-/* dwm's monocle(): every tiled client gets the whole work area. */
++/* dwm's monocle(): every tiled client gets the whole work area; the focused
++ * one is placed on top by restack(). */
+ static void
+ monocle(Monitor *m)
+ {
+ 	Client *c;
++	Rect w;
++
++	if (!nexttiled(m, NULL))
++		return;
+ 
++	w = gap_area(m);
+ 	for (c = nexttiled(m, NULL); c; c = nexttiled(m, c))
+-		place_tiled(c, m->windowed);
++		place_tiled(c, w);
+ }
+ 
+ static void
+-- 
+2.56.0
+

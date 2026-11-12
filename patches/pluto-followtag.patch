@@ -1,0 +1,53 @@
+diff --git a/config.def.h b/config.def.h
+index bf307e1..3d91a61 100644
+--- a/config.def.h
++++ b/config.def.h
+@@ -52,9 +52,10 @@ static const Layout layouts[] = {
+ #define TAGKEYS(KEY,TAG) \
+ 	{ MODKEY,                       KEY, view,           {.ui = 1 << TAG} }, \
+ 	{ MODKEY|ControlMask,           KEY, toggleview,     {.ui = 1 << TAG} }, \
+-	{ MODKEY|ShiftMask,             KEY, tag,            {.ui = 1 << TAG} }, \
++	{ MODKEY|ShiftMask,             KEY, followtag,     {.ui = 1 << TAG} }, \
+ 	{ MODKEY|ControlMask|ShiftMask, KEY, toggletag,      {.ui = 1 << TAG} }
+ 
++
+ /* commands */
+ static const char *menucmd[] = { "fuzzel", NULL };
+ static const char *termcmd[] = { "foot", NULL };
+@@ -79,7 +80,7 @@ static const Key keys[] = {
+ 	{ MODKEY|ShiftMask,             XKB_KEY_space,   togglefloating,   {0} },
+ 	{ MODKEY|ShiftMask,             XKB_KEY_f,       togglefullscreen, {0} },
+ 	{ MODKEY,                       XKB_KEY_0,       view,             {.ui = ~0u} },
+-	{ MODKEY|ShiftMask,             XKB_KEY_0,       tag,              {.ui = ~0u} },
++	{ MODKEY|ShiftMask,             XKB_KEY_0,       followtag,       {.ui = ~0u} },
+ 	{ MODKEY,                       XKB_KEY_comma,   focusmon,         {.i = -1} },
+ 	{ MODKEY,                       XKB_KEY_period,  focusmon,         {.i = +1} },
+ 	{ MODKEY|ShiftMask,             XKB_KEY_comma,   tagmon,           {.i = -1} },
+diff --git a/pluto.c b/pluto.c
+index d3c1510..c46d9c4 100644
+--- a/pluto.c
++++ b/pluto.c
+@@ -223,7 +223,7 @@ static void focusmon(const Arg *arg);
+ static void sendmon(Client *c, Monitor *m);
+ static void tagmon(const Arg *arg);
+ static void view(const Arg *arg);
+-static void tag(const Arg *arg);
++static void followtag(const Arg *arg);
+ static void toggleview(const Arg *arg);
+ static void toggletag(const Arg *arg);
+ static void movemouse(const Arg *arg);
+@@ -970,12 +970,12 @@ view(const Arg *arg)
+ }
+ 
+ static void
+-tag(const Arg *arg)
++followtag(const Arg *arg)
+ {
+ 	if (!selmon || !selmon->sel || !(arg->ui & TAGMASK))
+ 		return;
+ 	selmon->sel->tags = arg->ui & TAGMASK;
+-	focus(NULL);
++	view(arg);
+ }
+ 
+ static void
