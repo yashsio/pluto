@@ -1,37 +1,39 @@
-# Pluto - A dynamic tiling window manager for river
+# Pluto - a dwm-like window manager for river
 
-Pluto is small, fast dynamic tiling window manager for the [river](https://isaacfreund.com/software/river/) wayland compositor.
-It have 2 layouts dwidle (or BSP) and master stack like dwm.
-It also provides a tiny status IPC so bars such as [pluto-bar](https://github.com/yashsio/pluto-bar) can show tags, layout and the focused title, and switch tags with a click.
+Pluto is a small dynamic tiling window manager for the
+[river](https://isaacfreund.com/software/river/) Wayland compositor.  It is a
+port of dwm's policy to river: tags instead of workspaces, a master/stack
+layout, a focus stack, rules, and the same key bindings.  The whole window
+manager lives in one C file and is configured by editing `config.def.h`, just
+like dwm.
 
-# Requirements
+The status bar is deliberately left out.  Pluto only manages windows; use any
+river layer-shell bar you like.
 
-In order to build pluto you need:
+## Requirements
+
 - a C99 compiler
 - GNU or BSD make
 - wayland-scanner
+- wayland-client
 - libxkbcommon
 
-# Installation
+## Installation
 
-Edit config.mk to match your local setup.
-Afterwards enter the following command to build and install (if necessary as root):
+Edit `config.mk` to match your local setup, then run:
 
 	make clean install
 
+## Configuration
 
-# Configuration
+Copy `config.def.h` to `config.h`, edit it, and rebuild:
 
-The configuration of pluto is done by creating a custom config.h
-and (re)compiling the source code.
+	cp config.def.h config.h
+	make clean install
 
+The default configuration uses Mod4 (the Windows key) as `MODKEY`, keeps
+dwm's key bindings and tag model, and starts `foot` and `fuzzel`.
 
-# Credits
-
-Pluto is a fork of [JrWM](https://github.com/jpco/jrwm).
-
-
-# License
+## License
 
 Licensed under [GPL-3.0](LICENSE).
-
