@@ -1,13 +1,4 @@
-/* pluto - a dwm-like window manager for river
- *
- * Pluto is deliberately shaped like dwm: everything lives in this one file,
- * the configuration is a C header, and clients carry a tag bitmask.  The
- * window-manager protocol is river's, so the event plumbing is different, but
- * the policy code (tags, layouts, focus stack, rules) is dwm's.
- *
- * Copyright 2026 Isaac Freund, 2026 Jack Conger.  See LICENSE for details.
- * Copyright 2026 Yash Sharma.  See LICENSE for details.
- */
+/* See LICENSE file for copyright and license details. */
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
