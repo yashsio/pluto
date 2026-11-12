@@ -2,7 +2,7 @@
 
 pkgs.stdenv.mkDerivation {
   pname = "pluto";
-  version = "0.2";
+  version = "0.3";
   src = ./.;
 
   nativeBuildInputs = with pkgs; [

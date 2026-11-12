@@ -1,5 +1,5 @@
 # pluto version
-VERSION = 0.2
+VERSION = 0.3
 
 # paths
 PREFIX  = /usr/local
@@ -10,9 +10,11 @@ CC         ?= cc
 PKG_CONFIG ?= pkg-config
 PKGS        = wayland-client xkbcommon
 
+INCS     = -I. -I$(PROTODIR) $(shell $(PKG_CONFIG) --cflags $(PKGS))
+CPPFLAGS = -D_DEFAULT_SOURCE -DVERSION=\"$(VERSION)\"
+
 CFLAGS  ?= -g -O2
-CFLAGS  += -Wall -Wextra -Wno-unused-parameter -I. -I$(PROTODIR) \
-           $(shell $(PKG_CONFIG) --cflags $(PKGS))
+CFLAGS  += -std=c99 -Wall -Wextra -Wno-unused-parameter $(INCS) $(CPPFLAGS)
 LDFLAGS ?=
 LDLIBS   = $(shell $(PKG_CONFIG) --libs $(PKGS))
 

@@ -3,8 +3,8 @@
 
 include config.mk
 
-CFILES = pluto.c layout.c bindings.c input.c ipc.c $(PROTOC)
-HFILES = pluto.h config.h ipc.h $(PROTOH)
+CFILES = pluto.c $(PROTOC)
+HFILES = config.h $(PROTOH)
 
 all: pluto
 
@@ -18,11 +18,11 @@ clean:
 	rm -f pluto $(PROTOC) $(PROTOH)
 
 install: all
-	$(MKDIR_P) $(BINDIR)
-	$(INSTALL) pluto $(BINDIR)
+	$(MKDIR_P) $(DESTDIR)$(BINDIR)
+	$(INSTALL) pluto $(DESTDIR)$(BINDIR)
 
 uninstall:
-	rm -f $(BINDIR)/pluto
+	rm -f $(DESTDIR)$(BINDIR)/pluto
 
 .PHONY: all clean install uninstall
 
